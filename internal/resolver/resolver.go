@@ -48,12 +48,19 @@ func (r *ResolverService) Run(ctx context.Context) error {
 }
 
 func (r *ResolverService) fetchResolvers(ctx context.Context) {
-	sources := r.conf.Sources
+	r.refreshSources()
 	tk := time.NewTicker(time.Minute * r.conf.RefreshInterval)
+	defer tk.Stop()
+	for range tk.C {
+		r.refreshSources()
+	}
+	<-ctx.Done()
+
+}
+func (r *ResolverService) refreshSources() {
+	sources := r.conf.Sources
 	uniqueResources := make(map[string]struct{}, 1000)
 	mu := sync.Mutex{}
-	defer tk.Stop()
-	// for range tk.C {
 	wg := sync.WaitGroup{}
 	for _, res := range sources {
 		wg.Go(func() {
@@ -84,9 +91,6 @@ func (r *ResolverService) fetchResolvers(ctx context.Context) {
 		r.resolvers[addr] = result
 		<-sem
 	}
-	// }
-	<-ctx.Done()
-
 }
 
 func (r *ResolverService) fetchResource(source string) ([]string, error) {
