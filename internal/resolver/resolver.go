@@ -3,7 +3,7 @@ package resolver
 import (
 	"bufio"
 	"context"
-	"dns-db/pkg/conf"
+	"dns-resolver-finder/pkg/conf"
 	"fmt"
 	"net"
 	"net/http"
@@ -28,14 +28,18 @@ func NewResolver(ip string, duration time.Duration) *Resolver {
 }
 
 type ResolverService struct {
-	conf      *conf.Conf
-	resolvers map[string]*Resolver
+	conf       *conf.Conf
+	resolvers  map[string]*Resolver
+	mu         sync.Mutex
+	checkedIps map[string]struct{}
 }
 
 func NewResolverService(conf *conf.Conf) (*ResolverService, error) {
 	return &ResolverService{
-		conf:      conf,
-		resolvers: make(map[string]*Resolver, conf.MaxResolvers),
+		conf:       conf,
+		resolvers:  make(map[string]*Resolver, conf.MaxResolvers),
+		mu:         sync.Mutex{},
+		checkedIps: make(map[string]struct{}, 100_000),
 	}, nil
 }
 
@@ -49,7 +53,7 @@ func (r *ResolverService) Run(ctx context.Context) error {
 
 func (r *ResolverService) fetchResolvers(ctx context.Context) {
 	r.refreshSources()
-	tk := time.NewTicker(time.Minute * r.conf.RefreshInterval)
+	tk := time.NewTicker(time.Second * 5)
 	defer tk.Stop()
 	for range tk.C {
 		r.refreshSources()
@@ -86,8 +90,18 @@ func (r *ResolverService) refreshSources() {
 	var mapMu sync.Mutex
 
 	for addr := range uniqueResources {
+		r.mu.Lock()
+		if _, checked := r.checkedIps[addr]; checked {
+			r.mu.Unlock()
+			continue
+		}
+		r.mu.Unlock()
 		testWg.Add(1)
 		go func(address string) {
+			if r.mu.TryLock() {
+				r.checkedIps[address] = struct{}{}
+				r.mu.Unlock()
+			}
 			defer testWg.Done()
 
 			sem <- struct{}{}

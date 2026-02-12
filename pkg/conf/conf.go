@@ -2,7 +2,6 @@ package conf
 
 import (
 	"fmt"
-	"runtime"
 	"time"
 
 	"github.com/spf13/viper"
@@ -28,8 +27,8 @@ func NewConf() (*Conf, error) {
 	// v.SetDefault("sources", []string{"https://public-dns.info/nameservers.txt", "https://raw.githubusercontent.com/janmasarik/resolvers/master/resolvers.txt", "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt", "https://github.com/trickest/resolvers/blob/main/resolvers.txt"})
 	v.SetDefault("sources", []string{"https://raw.githubusercontent.com/janmasarik/resolvers/master/resolvers.txt", "https://public-dns.info/nameservers.txt"})
 	v.SetDefault("scan_ranges", []string{"2.188.21.0/24"})
-	v.SetDefault("refresh_interval", 2) // TODO: increase this to 60 minute later
-	v.SetDefault("max_resolve", runtime.NumCPU()*10)
+	v.SetDefault("refresh_interval", 1) // TODO: increase this to 60 minute later
+	v.SetDefault("max_resolve", 100)
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("failed to read config: %w", err)
 	}

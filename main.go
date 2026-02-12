@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"dns-db/internal/resolver"
-	"dns-db/pkg/conf"
+	"dns-resolver-finder/internal/resolver"
+	"dns-resolver-finder/pkg/conf"
 	"fmt"
 	"os"
 	"os/signal"

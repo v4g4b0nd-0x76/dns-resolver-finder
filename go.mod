@@ -1,4 +1,4 @@
-module dns-db
+module dns-resolver-finder
 
 go 1.25.7
 

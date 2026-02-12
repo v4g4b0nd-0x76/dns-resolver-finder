@@ -2,7 +2,7 @@ package resolver
 
 import (
 	"context"
-	"dns-db/pkg/conf"
+	"dns-resolver-finder/pkg/conf"
 	"testing"
 	"time"
 )
