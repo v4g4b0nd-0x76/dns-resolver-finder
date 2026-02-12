@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"dns-resolver-finder/internal/api"
 	"dns-resolver-finder/internal/resolver"
 	"dns-resolver-finder/pkg/conf"
 	"fmt"
@@ -21,8 +22,17 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	apiServer, err := api.NewAPIServer(conf, resolverService)
+	if err != nil {
+		panic(err)
+	}
 	go func() {
 		if err := resolverService.Run(ctx); err != nil {
+			panic(err)
+		}
+	}()
+	go func() {
+		if err := apiServer.Run(ctx); err != nil {
 			panic(err)
 		}
 	}()
