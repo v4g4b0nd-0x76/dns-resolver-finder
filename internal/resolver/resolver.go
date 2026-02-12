@@ -46,6 +46,7 @@ func NewResolverService(conf *conf.Conf) (*ResolverService, error) {
 func (r *ResolverService) Run(ctx context.Context) error {
 	fmt.Printf("Running resolver service at: %s\n", time.Now().Format(time.DateTime))
 	go r.fetchResolvers(ctx)
+	go r.scanRanges(ctx)
 	<-ctx.Done()
 	fmt.Printf("ResolverService: context done, shutting down\n")
 	return nil
@@ -56,8 +57,9 @@ func (r *ResolverService) fetchResolvers(ctx context.Context) {
 	tk := time.NewTicker(time.Second * 5)
 	defer tk.Stop()
 	for range tk.C {
-		r.refreshSources()
-		r.expireResolvers()
+		go r.refreshSources()
+		go r.expireResolvers()
+		go r.reEvaluateResolvers()
 	}
 	<-ctx.Done()
 
@@ -216,6 +218,120 @@ func TestAddr(addr string, testDomains []string) (*Resolver, error) {
 	return resolver, nil
 }
 
-func (r *ResolverService) scanRanges() {
+func (r *ResolverService) reEvaluateResolvers() {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, r.conf.MaxResolve)
+	for addr, resolver := range r.resolvers {
+		if time.Since(resolver.LastTest) < r.conf.RefreshInterval*time.Minute {
+			continue
+		}
+		wg.Add(1)
+		go func(address string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			result, err := TestAddr(address, r.conf.TestDomains)
+			if err != nil || result == nil {
+				return
+			}
+			r.mu.Lock()
+			r.resolvers[address] = result
+			r.mu.Unlock()
+		}(addr)
+	}
+	wg.Wait()
+}
+func (r *ResolverService) scanRanges(ctx context.Context) {
+	ranges := r.conf.ScanRanges
+	maxWorkers := r.conf.MaxResolve
+	if maxWorkers == 0 {
+		maxWorkers = 100
+	}
 
+	ipChan := make(chan string, maxWorkers)
+	var wg sync.WaitGroup
+	for i := 0; i < maxWorkers; i++ {
+		wg.Go(func() {
+			for ip := range ipChan {
+				r.mu.Lock()
+				if _, checked := r.checkedIps[ip]; checked {
+					r.mu.Unlock()
+					continue
+				}
+				r.checkedIps[ip] = struct{}{}
+				r.mu.Unlock()
+
+				result, err := TestAddr(ip, r.conf.TestDomains)
+				if err != nil || result == nil {
+					continue
+				}
+				fmt.Printf("Valid resolver found: %s with latency %3fs\n", ip, result.Latency.Seconds())
+
+				r.mu.Lock()
+				if len(r.resolvers) >= r.conf.MaxResolvers {
+					r.expireResolvers()
+					if len(r.resolvers) >= r.conf.MaxResolvers {
+						var worstAddr string
+						var maxLatency time.Duration = -1
+
+						for a, res := range r.resolvers {
+							if res.Latency > maxLatency {
+								maxLatency = res.Latency
+								worstAddr = a
+							}
+						}
+
+						if worstAddr != "" && maxLatency > result.Latency {
+							delete(r.resolvers, worstAddr)
+						} else {
+							r.mu.Unlock()
+							continue
+						}
+					}
+				}
+				r.resolvers[ip] = result
+				r.mu.Unlock()
+			}
+		})
+	}
+
+	for _, rng := range ranges {
+		ip, ipnet, err := net.ParseCIDR(rng)
+		if err != nil {
+			continue
+		}
+
+		for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incIP(ip) {
+			tempIP := make(net.IP, len(ip))
+			copy(tempIP, ip)
+
+			ones, _ := ipnet.Mask.Size()
+			if ones < 31 {
+				if tempIP.Equal(ipnet.IP) || isBroadcast(tempIP, ipnet) {
+					continue
+				}
+			}
+			ipChan <- tempIP.String()
+		}
+	}
+
+	close(ipChan)
+	wg.Wait()
+	<-ctx.Done()
+}
+func isBroadcast(ip net.IP, ipnet *net.IPNet) bool {
+	broadcast := make(net.IP, len(ipnet.IP))
+	for i := 0; i < len(ipnet.IP); i++ {
+		broadcast[i] = ipnet.IP[i] | ^ipnet.Mask[i]
+	}
+	return ip.Equal(broadcast)
+}
+
+func incIP(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] > 0 {
+			break
+		}
+	}
 }
