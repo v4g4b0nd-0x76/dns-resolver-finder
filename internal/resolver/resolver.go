@@ -41,7 +41,7 @@ func NewResolverService(conf *conf.Conf) (*ResolverService, error) {
 
 func (r *ResolverService) Run(ctx context.Context) error {
 	fmt.Printf("Running resolver service at: %s\n", time.Now().Format(time.DateTime))
-	r.fetchResolvers(ctx)
+	go r.fetchResolvers(ctx)
 	<-ctx.Done()
 	fmt.Printf("ResolverService: context done, shutting down\n")
 	return nil
@@ -53,6 +53,7 @@ func (r *ResolverService) fetchResolvers(ctx context.Context) {
 	defer tk.Stop()
 	for range tk.C {
 		r.refreshSources()
+		r.expireResolvers()
 	}
 	<-ctx.Done()
 
@@ -80,16 +81,51 @@ func (r *ResolverService) refreshSources() {
 	wg.Wait()
 
 	sem := make(chan struct{}, r.conf.MaxResolve)
-	for addr, _ := range uniqueResources {
+	for addr := range uniqueResources {
 		sem <- struct{}{}
-		result, err := r.testAddr(addr)
+		result, err := TestAddr(addr, r.conf.TestDomains)
 		if err != nil || result == nil {
 			<-sem
 			continue
 		}
 		fmt.Printf("%s is valid with %3fs latency\n", addr, result.Latency.Seconds())
-		r.resolvers[addr] = result
+		if len(r.resolvers) >= r.conf.MaxResolvers {
+			// run expireResolvers to make room for new resolvers
+			r.expireResolvers()
+			if len(r.resolvers) >= r.conf.MaxResolvers {
+				// remove resolver with more latency than current result
+				var worstAddr string
+				for addr, resolver := range r.resolvers {
+					if resolver.Latency > result.Latency {
+						worstAddr = addr
+						break
+					}
+				}
+				if worstAddr != "" {
+					delete(r.resolvers, worstAddr)
+				} else {
+					<-sem
+					continue
+				}
+			}
+		}
+		existing, ok := r.resolvers[addr]
+		if !ok {
+			r.resolvers[addr] = result
+		} else {
+			existing.Latency = result.Latency
+			existing.LastTest = time.Now()
+		}
 		<-sem
+	}
+}
+func (r *ResolverService) expireResolvers() {
+	expCount := 0
+	for addr, resolver := range r.resolvers {
+		if time.Since(resolver.LastTest) > (r.conf.RefreshInterval*2)*time.Minute {
+			delete(r.resolvers, addr)
+			expCount++
+		}
 	}
 }
 
@@ -98,15 +134,16 @@ func (r *ResolverService) fetchResource(source string) ([]string, error) {
 	fmt.Printf("fetching %s\n", source)
 	resp, err := http.Get(source)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch %s: %s\n", source, err.Error())
+		return nil, fmt.Errorf("failed to fetch %s: %s", source, err.Error())
 	}
 	defer resp.Body.Close()
 	scanner := bufio.NewScanner(resp.Body)
 	addrs := make([]string, 0, 1000)
 	for scanner.Scan() {
 		addr := scanner.Text()
-		// we first validate that the addr is ipv4 or ipv6
-		// then we send a dns query to the given test domains from conf and if the addr passed the quorum of the domains we save it in resolvers
+		if net.ParseIP(addr) == nil {
+			continue
+		}
 		addrs = append(addrs, addr)
 	}
 
@@ -130,13 +167,13 @@ var clientPool = sync.Pool{
 	},
 }
 
-func (r *ResolverService) testAddr(addr string) (*Resolver, error) {
+func TestAddr(addr string, testDomains []string) (*Resolver, error) {
 	msg := msgPool.Get().(*dns.Msg)
 	client := clientPool.Get().(*dns.Client)
 	msg.Id = dns.Id()
 	msg.RecursionDesired = true
-	msg.Question = make([]dns.Question, len(r.conf.TestDomains))
-	for i, domain := range r.conf.TestDomains {
+	msg.Question = make([]dns.Question, len(testDomains))
+	for i, domain := range testDomains {
 		msg.Question[i] = dns.Question{
 			Name:   dns.Fqdn(domain),
 			Qtype:  dns.TypeA,
@@ -156,9 +193,5 @@ func (r *ResolverService) testAddr(addr string) (*Resolver, error) {
 }
 
 func (r *ResolverService) scanRanges() {
-
-}
-
-func (r *ResolverService) testResolvers() {
 
 }

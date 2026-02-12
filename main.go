@@ -14,6 +14,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGABRT, syscall.SIGINT, os.Kill)
 	defer cancel()
 	conf, err := conf.NewConf()
+	if err != nil {
+		panic(err)
+	}
 	resolverService, err := resolver.NewResolverService(conf)
 	if err != nil {
 		panic(err)
