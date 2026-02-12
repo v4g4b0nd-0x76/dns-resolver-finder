@@ -79,45 +79,48 @@ func (r *ResolverService) refreshSources() {
 		})
 	}
 	wg.Wait()
+	fmt.Printf("len(uniqueResources): %v\n", len(uniqueResources))
 
 	sem := make(chan struct{}, r.conf.MaxResolve)
+
 	for addr := range uniqueResources {
-		sem <- struct{}{}
-		result, err := TestAddr(addr, r.conf.TestDomains)
-		if err != nil || result == nil {
-			<-sem
-			continue
-		}
-		fmt.Printf("%s is valid with %3fs latency\n", addr, result.Latency.Seconds())
-		if len(r.resolvers) >= r.conf.MaxResolvers {
-			// run expireResolvers to make room for new resolvers
-			r.expireResolvers()
+		go func(addr string) {
+			sem <- struct{}{}
+			result, err := TestAddr(addr, r.conf.TestDomains)
+			if err != nil || result == nil {
+				<-sem
+				return
+			}
+			fmt.Printf("%s is valid with %3fs latency\n", addr, result.Latency.Seconds())
 			if len(r.resolvers) >= r.conf.MaxResolvers {
-				// remove resolver with more latency than current result
-				var worstAddr string
-				for addr, resolver := range r.resolvers {
-					if resolver.Latency > result.Latency {
-						worstAddr = addr
-						break
+				r.expireResolvers()
+				if len(r.resolvers) >= r.conf.MaxResolvers {
+					var worstAddr string
+					for addr, resolver := range r.resolvers {
+						if resolver.Latency > result.Latency {
+							worstAddr = addr
+							break
+						}
+					}
+					if worstAddr != "" {
+						delete(r.resolvers, worstAddr)
+					} else {
+						<-sem
+						return
 					}
 				}
-				if worstAddr != "" {
-					delete(r.resolvers, worstAddr)
-				} else {
-					<-sem
-					continue
-				}
 			}
-		}
-		existing, ok := r.resolvers[addr]
-		if !ok {
-			r.resolvers[addr] = result
-		} else {
-			existing.Latency = result.Latency
-			existing.LastTest = time.Now()
-		}
-		<-sem
+			existing, ok := r.resolvers[addr]
+			if !ok {
+				r.resolvers[addr] = result
+			} else {
+				existing.Latency = result.Latency
+				existing.LastTest = time.Now()
+			}
+			<-sem
+		}(addr)
 	}
+
 }
 func (r *ResolverService) expireResolvers() {
 	expCount := 0
@@ -161,7 +164,7 @@ var clientPool = sync.Pool{
 	New: func() interface{} {
 		// Only create the config once
 		return &dns.Client{
-			Timeout: 2 * time.Second,
+			Timeout: time.Second,
 			Net:     "udp",
 		}
 	},
