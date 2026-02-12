@@ -60,68 +60,75 @@ func (r *ResolverService) fetchResolvers(ctx context.Context) {
 }
 func (r *ResolverService) refreshSources() {
 	sources := r.conf.Sources
-	uniqueResources := make(map[string]struct{}, 1000)
-	mu := sync.Mutex{}
-	wg := sync.WaitGroup{}
+	uniqueResources := make(map[string]struct{})
+	var fetchMu sync.Mutex
+	var fetchWg sync.WaitGroup
+
 	for _, res := range sources {
-		wg.Go(func() {
-			addrs, err := r.fetchResource(res)
+		fetchWg.Add(1)
+		go func(url string) {
+			defer fetchWg.Done()
+			addrs, err := r.fetchResource(url)
 			if err != nil {
-				fmt.Printf("failed to fetch %s: %s\n", res, err.Error())
-			}
-			mu.Lock()
-			for _, addr := range addrs {
-				if _, ok := uniqueResources[addr]; !ok {
-					uniqueResources[addr] = struct{}{}
-				}
-			}
-			mu.Unlock()
-		})
-	}
-	wg.Wait()
-	fmt.Printf("len(uniqueResources): %v\n", len(uniqueResources))
-
-	sem := make(chan struct{}, r.conf.MaxResolve)
-
-	for addr := range uniqueResources {
-		go func(addr string) {
-			sem <- struct{}{}
-			result, err := TestAddr(addr, r.conf.TestDomains)
-			if err != nil || result == nil {
-				<-sem
 				return
 			}
-			fmt.Printf("%s is valid with %3fs latency\n", addr, result.Latency.Seconds())
+			fetchMu.Lock()
+			for _, addr := range addrs {
+				uniqueResources[addr] = struct{}{}
+			}
+			fetchMu.Unlock()
+		}(res)
+	}
+	fetchWg.Wait()
+
+	sem := make(chan struct{}, r.conf.MaxResolve)
+	var testWg sync.WaitGroup
+	var mapMu sync.Mutex
+
+	for addr := range uniqueResources {
+		testWg.Add(1)
+		go func(address string) {
+			defer testWg.Done()
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			result, err := TestAddr(address, r.conf.TestDomains)
+			if err != nil || result == nil {
+				return
+			}
+			fmt.Printf("tested %s with latency %3fs\n", address, result.Latency.Seconds())
+
+			mapMu.Lock()
+			defer mapMu.Unlock()
+
 			if len(r.resolvers) >= r.conf.MaxResolvers {
 				r.expireResolvers()
 				if len(r.resolvers) >= r.conf.MaxResolvers {
 					var worstAddr string
-					for addr, resolver := range r.resolvers {
-						if resolver.Latency > result.Latency {
-							worstAddr = addr
-							break
+					var maxLatency time.Duration = -1
+
+					for a, res := range r.resolvers {
+						if res.Latency > maxLatency {
+							maxLatency = res.Latency
+							worstAddr = a
 						}
 					}
-					if worstAddr != "" {
+
+					if worstAddr != "" && maxLatency > result.Latency {
 						delete(r.resolvers, worstAddr)
-					} else {
-						<-sem
+					} else if len(r.resolvers) >= r.conf.MaxResolvers {
 						return
 					}
 				}
 			}
-			existing, ok := r.resolvers[addr]
-			if !ok {
-				r.resolvers[addr] = result
-			} else {
-				existing.Latency = result.Latency
-				existing.LastTest = time.Now()
-			}
-			<-sem
+
+			r.resolvers[address] = result
 		}(addr)
 	}
-
+	testWg.Wait()
 }
+
 func (r *ResolverService) expireResolvers() {
 	expCount := 0
 	for addr, resolver := range r.resolvers {
