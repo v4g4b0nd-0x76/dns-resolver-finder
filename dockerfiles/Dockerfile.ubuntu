@@ -1,0 +1,5 @@
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y golang-go ca-certificates
+WORKDIR /build
+COPY . .
+RUN go build -o dns-scanner 
