@@ -4,24 +4,19 @@ import (
 	"bufio"
 	"context"
 	"dns-resolver-finder/pkg/conf"
+	"dns-resolver-finder/pkg/radix"
+	"dns-resolver-finder/pkg/types"
 	"fmt"
 	"net"
 	"net/http"
-	"sort"
 	"sync"
 	"time"
 
 	"github.com/miekg/dns"
 )
 
-type Resolver struct {
-	IP       string        `json:"ip"`
-	Latency  time.Duration `json:"latency"`
-	LastTest time.Time     `json:"last_test"`
-}
-
-func NewResolver(ip string, duration time.Duration) *Resolver {
-	return &Resolver{
+func NewResolver(ip string, duration time.Duration) *types.Resolver {
+	return &types.Resolver{
 		IP:       ip,
 		Latency:  duration,
 		LastTest: time.Now(),
@@ -30,7 +25,7 @@ func NewResolver(ip string, duration time.Duration) *Resolver {
 
 type ResolverService struct {
 	conf       *conf.Conf
-	resolvers  map[string]*Resolver
+	resolvers  radix.IPTree
 	mu         sync.Mutex
 	checkedIps map[string]struct{}
 }
@@ -38,7 +33,7 @@ type ResolverService struct {
 func NewResolverService(conf *conf.Conf) (*ResolverService, error) {
 	return &ResolverService{
 		conf:       conf,
-		resolvers:  make(map[string]*Resolver, conf.MaxResolvers),
+		resolvers:  *radix.NewIPTree(conf.MaxResolvers),
 		mu:         sync.Mutex{},
 		checkedIps: make(map[string]struct{}, 100_000),
 	}, nil
@@ -90,35 +85,21 @@ func (r *ResolverService) refreshSources() {
 
 	sem := make(chan struct{}, r.conf.MaxResolve)
 	var testWg sync.WaitGroup
-	resultsChan := make(chan *Resolver, len(uniqueResources))
+	resultsChan := make(chan *types.Resolver, len(uniqueResources))
 	go func() {
 		for result := range resultsChan {
 			r.mu.Lock()
 
-			if len(r.resolvers) >= r.conf.MaxResolvers {
+			if r.resolvers.Len() >= r.conf.MaxResolvers {
 				r.expireResolvers()
-				if len(r.resolvers) >= r.conf.MaxResolvers {
-					var worstAddr string
-					var maxLatency time.Duration = -1
-
-					for a, res := range r.resolvers {
-						if res.Latency > maxLatency {
-							maxLatency = res.Latency
-							worstAddr = a
-						}
-					}
-
-					if worstAddr != "" && maxLatency > result.Latency {
-						delete(r.resolvers, worstAddr)
-					} else if len(r.resolvers) >= r.conf.MaxResolvers {
-						r.mu.Unlock()
-						continue
-					}
+				if r.resolvers.Len() >= r.conf.MaxResolvers {
+					r.resolvers.ReplaceWorst(result)
+					continue
 				}
 			}
 
-			r.resolvers[result.IP] = result
-			fmt.Printf("added resolver %s with latency %3fs, current resolvers length: %d\n", result.IP, result.Latency.Seconds(), len(r.resolvers))
+			r.resolvers.Insert(result)
+			fmt.Printf("added resolver %s with latency %3fs, current resolvers length: %d\n", result.IP, result.Latency.Seconds(), r.resolvers.Len())
 
 			r.mu.Unlock()
 		}
@@ -145,7 +126,6 @@ func (r *ResolverService) refreshSources() {
 			if err != nil || result == nil {
 				return
 			}
-			fmt.Printf("tested %s with latency %3fs\n", address, result.Latency.Seconds())
 			resultsChan <- result
 
 		}(addr)
@@ -156,9 +136,9 @@ func (r *ResolverService) refreshSources() {
 
 func (r *ResolverService) expireResolvers() {
 	expCount := 0
-	for addr, resolver := range r.resolvers {
+	for _, resolver := range r.resolvers.GetAll() {
 		if time.Since(resolver.LastTest) > (r.conf.RefreshInterval*2)*time.Minute {
-			delete(r.resolvers, addr)
+			r.resolvers.Delete(resolver.IP)
 			expCount++
 		}
 	}
@@ -202,7 +182,7 @@ var clientPool = sync.Pool{
 	},
 }
 
-func TestAddr(addr string, testDomains []string) (*Resolver, error) {
+func TestAddr(addr string, testDomains []string) (*types.Resolver, error) {
 	msg := msgPool.Get().(*dns.Msg)
 	client := clientPool.Get().(*dns.Client)
 	msg.Id = dns.Id()
@@ -230,7 +210,7 @@ func TestAddr(addr string, testDomains []string) (*Resolver, error) {
 func (r *ResolverService) reEvaluateResolvers() {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, r.conf.MaxResolve)
-	for addr, resolver := range r.resolvers {
+	for _, resolver := range r.resolvers.GetAll() {
 		if time.Since(resolver.LastTest) < r.conf.RefreshInterval*time.Minute {
 			continue
 		}
@@ -244,9 +224,12 @@ func (r *ResolverService) reEvaluateResolvers() {
 				return
 			}
 			r.mu.Lock()
-			r.resolvers[address] = result
+			if existing := r.resolvers.Get(address); existing != nil {
+				existing.Latency = result.Latency
+				existing.LastTest = time.Now()
+			}
 			r.mu.Unlock()
-		}(addr)
+		}(resolver.IP)
 	}
 	wg.Wait()
 }
@@ -278,31 +261,21 @@ func (r *ResolverService) scanRange(ctx context.Context, cidr string, ipChan cha
 func (r *ResolverService) scanRanges(ctx context.Context) {
 	ticker := time.NewTicker(r.conf.RefreshInterval * time.Minute)
 	defer ticker.Stop()
-	resultChan := make(chan *Resolver, 1000)
+	resultChan := make(chan *types.Resolver, 1000)
 	go func() {
 
 		for result := range resultChan {
 			r.mu.Lock()
-			if len(r.resolvers) >= r.conf.MaxResolvers {
+			if r.resolvers.Len() >= r.conf.MaxResolvers {
 				r.expireResolvers()
-				if len(r.resolvers) >= r.conf.MaxResolvers {
-					var worstAddr string
-					var maxLatency time.Duration = -1
-					for a, res := range r.resolvers {
-						if res.Latency > maxLatency {
-							maxLatency = res.Latency
-							worstAddr = a
-						}
-					}
-					if worstAddr != "" && maxLatency > result.Latency {
-						delete(r.resolvers, worstAddr)
-					} else {
-						r.mu.Unlock()
-						continue
-					}
+				if r.resolvers.Len() >= r.conf.MaxResolvers {
+					r.resolvers.ReplaceWorst(result)
+					r.mu.Unlock()
+					continue
 				}
 			}
-			r.resolvers[result.IP] = result
+			r.resolvers.Insert(result)
+			fmt.Printf("added resolver %s with latency %3fs from scan, current resolvers length: %d\n", result.IP, result.Latency.Seconds(), r.resolvers.Len())
 			r.mu.Unlock()
 		}
 	}()
@@ -370,18 +343,10 @@ func incIP(ip net.IP) {
 	}
 }
 
-func (r *ResolverService) GetResolvers() []*Resolver {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	resolvers := make([]*Resolver, 0, len(r.resolvers))
-	if len(r.resolvers) == 0 {
-		return resolvers
-	}
-	for _, resolver := range r.resolvers {
-		resolvers = append(resolvers, resolver)
-	}
-	sort.Slice(resolvers, func(i, j int) bool {
-		return resolvers[i].Latency < resolvers[j].Latency
-	})
-	return resolvers
+func (r *ResolverService) GetResolvers() []*types.Resolver {
+	return r.resolvers.GetAllSortedByLatency()
+}
+
+func (r *ResolverService) GetResolver(ip string) *types.Resolver {
+	return r.resolvers.Get(ip)
 }
