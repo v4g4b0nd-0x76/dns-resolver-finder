@@ -37,7 +37,7 @@ func main() {
 			panic(err)
 		}
 	}()
-	if conf.TelegramToken != "" && conf.TelegramChatID != 0 {
+	if conf.TelegramToken != "" && conf.TelegramChatID != "" {
 		telegramService, err := telegram.NewTelegramService(conf, resolverService)
 		if err != nil {
 			panic(err)

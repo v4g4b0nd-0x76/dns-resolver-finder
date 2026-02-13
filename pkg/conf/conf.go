@@ -15,7 +15,7 @@ type Conf struct {
 	RefreshInterval time.Duration `mapstructure:"refresh_interval"`
 	MaxResolve      int           `mapstructure:"max_resolve"`
 	TelegramToken   string        `mapstructure:"telegram_token"`
-	TelegramChatID  int64         `mapstructure:"telegram_chat_id"`
+	TelegramChatID  string        `mapstructure:"telegram_chat_id"`
 }
 
 func NewConf() (*Conf, error) {

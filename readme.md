@@ -5,3 +5,6 @@ test them , calculate their latency and save them into a radix in memory
 reevaluate them base on configured interval and remove the bad ones
 scan ranges to find valid dns resolvers and add them to the radix
 
+
+send top 10 resolved ips to telegram with push notification
+
