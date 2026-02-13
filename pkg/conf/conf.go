@@ -14,6 +14,8 @@ type Conf struct {
 	ScanRanges      []string      `mapstructure:"scan_ranges"`
 	RefreshInterval time.Duration `mapstructure:"refresh_interval"`
 	MaxResolve      int           `mapstructure:"max_resolve"`
+	TelegramToken   string        `mapstructure:"telegram_token"`
+	TelegramChatID  int64         `mapstructure:"telegram_chat_id"`
 }
 
 func NewConf() (*Conf, error) {
@@ -27,8 +29,8 @@ func NewConf() (*Conf, error) {
 	// v.SetDefault("sources", []string{"https://public-dns.info/nameservers.txt", "https://raw.githubusercontent.com/janmasarik/resolvers/master/resolvers.txt", "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt", "https://github.com/trickest/resolvers/blob/main/resolvers.txt"})
 	v.SetDefault("sources", []string{"https://raw.githubusercontent.com/janmasarik/resolvers/master/resolvers.txt", "https://public-dns.info/nameservers.txt"})
 	v.SetDefault("scan_ranges", []string{"2.188.21.0/24"})
-	v.SetDefault("refresh_interval", 1) // TODO: increase this to 60 minute later
-	v.SetDefault("max_resolve", 100)
+	v.SetDefault("refresh_interval", 120) // TODO: increase this to 60 minute later
+	v.SetDefault("max_resolve", 500)
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("failed to read config: %w", err)
 	}

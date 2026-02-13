@@ -1,4 +1,7 @@
-# Dns DB
+# DNS finder
 
-a simple minimal sqlite database to store dns resolvers ordered by their response time and revalidate on interval uisng golang dnsx project
-and a simple api to query the database and get the best resolvers for a given domain
+find dns resolvers base on github or any provided source ips 
+test them , calculate their latency and save them into a radix in memory
+reevaluate them base on configured interval and remove the bad ones
+scan ranges to find valid dns resolvers and add them to the radix
+

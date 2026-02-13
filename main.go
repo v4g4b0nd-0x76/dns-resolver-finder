@@ -4,6 +4,7 @@ import (
 	"context"
 	"dns-resolver-finder/internal/api"
 	"dns-resolver-finder/internal/resolver"
+	"dns-resolver-finder/internal/telegram"
 	"dns-resolver-finder/pkg/conf"
 	"fmt"
 	"os"
@@ -36,6 +37,17 @@ func main() {
 			panic(err)
 		}
 	}()
+	if conf.TelegramToken != "" && conf.TelegramChatID != 0 {
+		telegramService, err := telegram.NewTelegramService(conf, resolverService)
+		if err != nil {
+			panic(err)
+		}
+		go func() {
+			if err := telegramService.Run(ctx); err != nil {
+				panic(err)
+			}
+		}()
+	}
 	<-ctx.Done()
 	fmt.Printf("exiting")
 }
