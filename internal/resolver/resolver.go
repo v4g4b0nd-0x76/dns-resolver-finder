@@ -60,6 +60,7 @@ func (r *ResolverService) fetchResolvers(ctx context.Context) {
 	<-ctx.Done()
 
 }
+
 func (r *ResolverService) refreshSources() {
 	sources := r.conf.Sources
 	uniqueResources := make(map[string]struct{})
@@ -86,24 +87,22 @@ func (r *ResolverService) refreshSources() {
 	sem := make(chan struct{}, r.conf.MaxResolve)
 	var testWg sync.WaitGroup
 	resultsChan := make(chan *types.Resolver, len(uniqueResources))
-	go func() {
+
+	var collectorWg sync.WaitGroup
+	collectorWg.Go(func() {
 		for result := range resultsChan {
 			r.mu.Lock()
-
 			if r.resolvers.Len() >= r.conf.MaxResolvers {
 				r.expireResolvers()
-				if r.resolvers.Len() >= r.conf.MaxResolvers {
-					r.resolvers.ReplaceWorst(result)
-					continue
-				}
+				replacedIp := r.resolvers.ReplaceWorst(result)
+				fmt.Printf("Replaced %s with %s with %dms latency\n", replacedIp, result.IP, result.Latency.Milliseconds())
+			} else {
+				r.resolvers.Insert(result)
+				fmt.Printf("Inserted %s with %dms latency\n", result.IP, result.Latency.Milliseconds())
 			}
-
-			r.resolvers.Insert(result)
-			fmt.Printf("added resolver %s with latency %3fs, current resolvers length: %d\n", result.IP, result.Latency.Seconds(), r.resolvers.Len())
-
 			r.mu.Unlock()
 		}
-	}()
+	})
 
 	for addr := range uniqueResources {
 		r.mu.Lock()
@@ -112,26 +111,27 @@ func (r *ResolverService) refreshSources() {
 			continue
 		}
 		r.mu.Unlock()
+
 		testWg.Add(1)
 		go func(address string) {
+			defer testWg.Done()
 			r.mu.Lock()
 			r.checkedIps[address] = struct{}{}
 			r.mu.Unlock()
-			defer testWg.Done()
 
 			sem <- struct{}{}
-			defer func() { <-sem }()
-
 			result, err := TestAddr(address, r.conf.TestDomains)
-			if err != nil || result == nil {
-				return
-			}
-			resultsChan <- result
+			<-sem
 
+			if err == nil && result != nil {
+				resultsChan <- result
+			}
 		}(addr)
 	}
+
 	testWg.Wait()
 	close(resultsChan)
+	collectorWg.Wait()
 }
 
 func (r *ResolverService) expireResolvers() {
@@ -261,22 +261,29 @@ func (r *ResolverService) scanRange(ctx context.Context, cidr string, ipChan cha
 func (r *ResolverService) scanRanges(ctx context.Context) {
 	ticker := time.NewTicker(r.conf.RefreshInterval * time.Minute)
 	defer ticker.Stop()
-	resultChan := make(chan *types.Resolver, 1000)
-	go func() {
 
-		for result := range resultChan {
-			r.mu.Lock()
-			if r.resolvers.Len() >= r.conf.MaxResolvers {
-				r.expireResolvers()
-				if r.resolvers.Len() >= r.conf.MaxResolvers {
-					r.resolvers.ReplaceWorst(result)
-					r.mu.Unlock()
-					continue
+	resultChan := make(chan *types.Resolver, 1000)
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case result, ok := <-resultChan:
+				if !ok {
+					return
 				}
+				r.mu.Lock()
+				if r.resolvers.Len() >= r.conf.MaxResolvers {
+					r.expireResolvers()
+					replacedIp := r.resolvers.ReplaceWorst(result)
+					fmt.Printf("Replaced %s with %s with %dms latency\n", replacedIp, result.IP, result.Latency.Milliseconds())
+				} else {
+					r.resolvers.Insert(result)
+					fmt.Printf("Inserted %s with %dms latency\n", result.IP, result.Latency.Milliseconds())
+				}
+				r.mu.Unlock()
 			}
-			r.resolvers.Insert(result)
-			fmt.Printf("added resolver %s with latency %3fs from scan, current resolvers length: %d\n", result.IP, result.Latency.Seconds(), r.resolvers.Len())
-			r.mu.Unlock()
 		}
 	}()
 
@@ -301,11 +308,13 @@ func (r *ResolverService) scanRanges(ctx context.Context) {
 					r.mu.Unlock()
 
 					result, err := TestAddr(ip, r.conf.TestDomains)
-					if err != nil || result == nil {
-						continue
+					if err == nil && result != nil {
+						select {
+						case resultChan <- result:
+						case <-ctx.Done():
+							return
+						}
 					}
-
-					resultChan <- result
 				}
 			})
 		}
@@ -318,6 +327,7 @@ func (r *ResolverService) scanRanges(ctx context.Context) {
 
 		select {
 		case <-ctx.Done():
+			close(resultChan)
 			return
 		case <-ticker.C:
 			r.mu.Lock()
@@ -326,6 +336,7 @@ func (r *ResolverService) scanRanges(ctx context.Context) {
 		}
 	}
 }
+
 func isBroadcast(ip net.IP, ipnet *net.IPNet) bool {
 	broadcast := make(net.IP, len(ipnet.IP))
 	for i := 0; i < len(ipnet.IP); i++ {

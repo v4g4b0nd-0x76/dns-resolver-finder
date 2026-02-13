@@ -93,13 +93,13 @@ func (t *IPTree) delete(curr *node, ip net.IP, bitIdx int) bool {
 	return false
 }
 
-func (t *IPTree) ReplaceWorst(newRes *types.Resolver) {
+func (t *IPTree) ReplaceWorst(newRes *types.Resolver) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if t.size < t.capacity {
 		t.insert(newRes)
-		return
+		return ""
 	}
 
 	var worstIP string
@@ -119,6 +119,7 @@ func (t *IPTree) ReplaceWorst(newRes *types.Resolver) {
 		t.delete(t.root, parsedWorst, 0)
 		t.insert(newRes)
 	}
+	return worstIP
 }
 
 func (t *IPTree) SearchRange(cidr string) []*types.Resolver {
